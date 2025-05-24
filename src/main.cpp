@@ -63,7 +63,7 @@ void setupBluetoothUART() {
     uint16_t baud = 103; // 16MHz / (16 * 9600) - 1 = 103
     UBRR0H = (baud >> 8);
     UBRR0L = baud;
-    UCSR0B |= (1 << TXEN0) | (1 << RXEN0); // Enable TX și RX
+    UCSR0B |= (1 << TXEN0) | (1 << RXEN0); // Enable TX si RX
     UCSR0C |= (1 << UCSZ01) | (1 << UCSZ00); // 8 data bits, 1 stop bit
 }
 void btTransmit(char data) {
@@ -106,10 +106,10 @@ void updateLCD(int line, const char* text) {
 }
 void setLCDMessage(int line, const char* text) {
     char* targetLine = (line == 0) ? newLine0 : newLine1;
-    cli(); // oprește întreruperile temporar
+    cli(); // opreste intreruperile temporar
     strncpy(targetLine, text, 16);
     targetLine[16] = '\0';
-    sei(); // pornește înapoi
+    sei(); // porneste inapoi
 }
 
 void refreshLCD() {
@@ -161,7 +161,6 @@ int main() {
     refreshLCD();
     lastLcdUpdate = millis();
 
-    // IMPORTANT: NU exista Serial.begin, Serial.print etc!
     btPrintln("Sistem pornit cu Bluetooth!");
 
     while (1) {
@@ -206,7 +205,7 @@ int main() {
         // --- 3. PIR ---
         pirVal = readPin(&PIND, PIR_PIN);
 
-        // --- 4. LED-uri și LCD ---
+        // --- 4. LED-uri si LCD ---
         if (pirVal) {
             if (useLed1) {
                 writePin(&PORTB, LED1_PIN, 1);
