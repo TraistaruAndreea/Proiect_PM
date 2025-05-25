@@ -165,45 +165,36 @@ int main() {
 
     while (1) {
         unsigned long currentTime = millis();
+        // --- 1. PIR ---
+        pirVal = readPin(&PIND, PIR_PIN);
 
-        // --- 1. Bluetooth ---
+        // --- 2. Bluetooth ---
         if (btAvailable()) {
             char cmd = btRead();
             btPrint("Comanda BT: ");
             btTransmit(cmd);
             btPrintln("");
 
-            if (cmd == '1') {
-                useLed1 = 1;
-                btPrintln("Selectat LED ROSU");
-                if (pirVal) {
-                    setLCDMessage(1, "LED ROSU aprins");
-                }
-            } else if (cmd == '0') {
-                useLed1 = 0;
-                btPrintln("Selectat LED VERDE");
-                if (pirVal) {
-                    setLCDMessage(1, "LED VERDE aprins");
+            setLCDMessage(1, "Led aprins");
+            if (pirVal) {
+                if (cmd == '1') {
+                    useLed1 = 1;
+                } else if (cmd == '0') {
+                    useLed1 = 0;
                 }
             }
         }
 
-        // --- 2. Buton cu debounce ---
+        // --- 3. Buton cu debounce ---
         uint8_t currentButtonState = readButtonDebounced();
         if (currentButtonState && !lastButtonState && (currentTime - lastButtonPress > DEBOUNCE_DELAY * 4)) {
             useLed1 = !useLed1;
             lastButtonPress = currentTime;
             btPrint("Buton apasat! LED: ");
             btPrintln(useLed1 ? "ROSU" : "VERDE");
-            if (pirVal) {
-                if (useLed1) setLCDMessage(1, "LED ROSU aprins");
-                else setLCDMessage(1, "LED VERDE aprins");
-            }
         }
         lastButtonState = currentButtonState;
 
-        // --- 3. PIR ---
-        pirVal = readPin(&PIND, PIR_PIN);
 
         // --- 4. LED-uri si LCD ---
         if (pirVal) {
@@ -219,8 +210,7 @@ int main() {
                 sprintf(printBuffer, "%lu min %lu sec: Miscare!", myTime / MINUTE, (myTime % MINUTE) / SECOND);
                 btPrintln(printBuffer);
                 setLCDMessage(0, "Miscare");
-                if (useLed1) setLCDMessage(1, "LED ROSU aprins");
-                else setLCDMessage(1, "LED VERDE aprins");
+                setLCDMessage(1, "Led aprins");
                 lastPirVal = 1;
             }
         } else {
