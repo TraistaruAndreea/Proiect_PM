@@ -2,14 +2,15 @@
 #include <LiquidCrystal.h>
 #include <SoftwareSerial.h>
 #include <stdio.h>
+#include <avr/interrupt.h>
 
 #define MINUTE 60000UL
 #define SECOND 1000UL
 
-#define PIR_PIN A2         // Arduino analog pin A2
-#define BUTTON_PIN A5      // Arduino analog pin A5
-#define LED2_PIN A4        // Arduino analog pin A4 (Green)
-#define LED1_PIN A3        // Arduino analog pin A3 (Red)
+#define PIR_PIN A2
+#define BUTTON_PIN A5
+#define LED2_PIN A4
+#define LED1_PIN A3
 
 #define LCD_RS 8
 #define LCD_E  9
@@ -18,8 +19,8 @@
 #define LCD_D6 12
 #define LCD_D7 13
 
-#define BT_RX A0   // Arduino RX  (connects to Bluetooth TX)
-#define BT_TX A1   // Arduino TX  (connects to Bluetooth RX)
+#define BT_RX A0
+#define BT_TX A1
 
 LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 SoftwareSerial btSerial(BT_RX, BT_TX); // RX, TX
@@ -31,9 +32,7 @@ volatile uint8_t lastButtonState = 0;
 volatile uint8_t useLed1 = 0;
 
 unsigned long lastButtonPress = 0;
-unsigned long lastLcdUpdate = 0;
 const unsigned long DEBOUNCE_DELAY = 50;
-const unsigned long LCD_UPDATE_INTERVAL = 100;
 
 char currentLine0[17] = "";
 char currentLine1[17] = "";
@@ -43,17 +42,36 @@ char newLine1[17] = "";
 unsigned long myTime;
 char printBuffer[128];
 
+volatile bool flag_lcd = false;
+
+// -------- Timer1 for LCD refresh every 100ms --------
+void setupTimer1() {
+  noInterrupts();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCNT1 = 0;
+
+  OCR1A = 24999; // 100ms at 16MHz with prescaler 64
+  TCCR1B |= (1 << WGM12);              // CTC mode
+  TCCR1B |= (1 << CS11) | (1 << CS10); // Prescaler 64
+  TIMSK1 |= (1 << OCIE1A);             // Enable Timer1 compare interrupt
+  interrupts();
+}
+
+ISR(TIMER1_COMPA_vect) {
+  flag_lcd = true;
+}
+
 // -------- LCD Text Helpers --------
 void updateLCD(int line, const char* text) {
     char* currentLine = (line == 0) ? currentLine0 : currentLine1;
     if (strcmp(currentLine, text) != 0) {
         lcd.setCursor(0, line);
-        lcd.print("                "); // Clear line (16 spaces)
+        lcd.print("                ");
         lcd.setCursor(0, line);
         lcd.print(text);
         strncpy(currentLine, text, 16);
         currentLine[16] = '\0';
-        delay(10);
     }
 }
 void setLCDMessage(int line, const char* text) {
@@ -65,12 +83,8 @@ void setLCDMessage(int line, const char* text) {
 }
 
 void refreshLCD() {
-    unsigned long currentTime = millis();
-    if (currentTime - lastLcdUpdate >= LCD_UPDATE_INTERVAL) {
-        updateLCD(0, newLine0);
-        updateLCD(1, newLine1);
-        lastLcdUpdate = currentTime;
-    }
+    updateLCD(0, newLine0);
+    updateLCD(1, newLine1);
 }
 
 uint8_t readButtonDebounced() {
@@ -91,23 +105,14 @@ uint8_t readButtonDebounced() {
     return buttonState;
 }
 
-// -------- Bluetooth Helpers (SoftwareSerial) --------
+// -------- Bluetooth --------
 void setupBluetoothUART() {
     btSerial.begin(9600);
-    // Optionally, Serial.begin(9600); // For USB debug
 }
-void btPrint(const char* str) {
-    btSerial.print(str);
-}
-void btPrintln(const char* str) {
-    btSerial.println(str);
-}
-uint8_t btAvailable() {
-    return btSerial.available();
-}
-char btRead() {
-    return btSerial.read();
-}
+void btPrint(const char* str) { btSerial.print(str); }
+void btPrintln(const char* str) { btSerial.println(str); }
+uint8_t btAvailable() { return btSerial.available(); }
+char btRead() { return btSerial.read(); }
 
 void setup() {
     pinMode(LED1_PIN, OUTPUT);
@@ -118,6 +123,7 @@ void setup() {
     digitalWrite(LED2_PIN, LOW);
 
     setupBluetoothUART();
+    setupTimer1();
 
     delay(100);
     lcd.begin(16, 2);
@@ -126,52 +132,46 @@ void setup() {
     setLCDMessage(0, "Senzor PIR");
     setLCDMessage(1, "Asteptare...");
     refreshLCD();
-    lastLcdUpdate = millis();
 
     btPrintln("Sistem pornit cu Bluetooth!");
 }
 
 void loop() {
-    unsigned long currentTime = millis();
-
-    // --- 1. PIR Sensor ---
     pirVal = digitalRead(PIR_PIN);
+    if (pirVal) {
+        setLCDMessage(0, "Miscare");
+        if (btAvailable()) {
+            char cmd = btRead();
+            btPrint("Comanda BT: ");
+            btSerial.write(cmd);
+            btPrintln("");
 
-    // --- 2. Bluetooth ---
-    if (btAvailable()) {
-        char cmd = btRead();
-        btPrint("Comanda BT: ");
-        btSerial.write(cmd);
-        btPrintln("");
-
-        // Allow Bluetooth to control regardless of PIR
-        if (cmd == '1') {
-            useLed1 = 1;
-        } else if (cmd == '0') {
-            useLed1 = 0;
+            if (cmd == '1') {
+                useLed1 = 1;
+            } else if (cmd == '0') {
+                useLed1 = 0;
+            }
+            setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
         }
-        setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
     }
 
-    // --- 3. Button with debounce ---
     uint8_t currentButtonState = readButtonDebounced();
-    if (currentButtonState && !lastButtonState && (currentTime - lastButtonPress > DEBOUNCE_DELAY * 4)) {
+    if (currentButtonState && !lastButtonState && (millis() - lastButtonPress > DEBOUNCE_DELAY * 4)) {
         useLed1 = !useLed1;
-        lastButtonPress = currentTime;
+        lastButtonPress = millis();
         btPrint("Buton apasat! LED: ");
         btPrintln(useLed1 ? "ROSU" : "VERDE");
         setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
     }
     lastButtonState = currentButtonState;
 
-    // --- 4. LEDs and LCD ---
     if (pirVal) {
         if (useLed1) {
-            digitalWrite(LED1_PIN, HIGH);   // Red ON
-            digitalWrite(LED2_PIN, LOW);    // Green OFF
+            digitalWrite(LED1_PIN, HIGH);
+            digitalWrite(LED2_PIN, LOW);
         } else {
-            digitalWrite(LED1_PIN, LOW);    // Red OFF
-            digitalWrite(LED2_PIN, HIGH);   // Green ON
+            digitalWrite(LED1_PIN, LOW);
+            digitalWrite(LED2_PIN, HIGH);
         }
         if (!lastPirVal) {
             myTime = millis();
@@ -194,6 +194,10 @@ void loop() {
         }
     }
 
-    refreshLCD();
+    if (flag_lcd) {
+        flag_lcd = false;
+        refreshLCD();
+    }
+
     delay(10);
 }
