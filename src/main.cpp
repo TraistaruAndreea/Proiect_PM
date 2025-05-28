@@ -1,29 +1,32 @@
-#include <Arduino.h>
+
 #include <LiquidCrystal.h>
 #include <SoftwareSerial.h>
-#include <stdio.h>
+#include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/delay.h>
+#include <stdio.h>
+#include <string.h>
 
-#define MINUTE 60000UL
-#define SECOND 1000UL
+#define MINUTE 60000
+#define SECOND 1000
 
-#define PIR_PIN A2
-#define BUTTON_PIN A5
-#define LED2_PIN A4
-#define LED1_PIN A3
+// Pin Definitions
+#define PIR_PIN         PC2     // A2
+#define BUTTON_PIN      PC5     // A5
+#define LED2_PIN        PC4     // A4
+#define LED1_PIN        PC3     // A3
 
-#define LCD_RS 8
-#define LCD_E  9
-#define LCD_D4 10
-#define LCD_D5 11
-#define LCD_D6 12
-#define LCD_D7 13
+// LCD Pins
+#define LCD_RS          PB0     // 8
+#define LCD_E           PB1     // 9
+#define LCD_D4          PB2     // 10
+#define LCD_D5          PB3     // 11
+#define LCD_D6          PB4     // 12
+#define LCD_D7          PB5     // 13
 
-#define BT_RX A0
-#define BT_TX A1
-
-LiquidCrystal lcd(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
-SoftwareSerial btSerial(BT_RX, BT_TX); // RX, TX
+// Bluetooth Pins
+#define BT_RX           PC0     // A0
+#define BT_TX           PC1     // A1
 
 volatile uint8_t lastPirVal = 0;
 volatile uint8_t pirVal = 0;
@@ -31,38 +34,79 @@ volatile uint8_t buttonState = 0;
 volatile uint8_t lastButtonState = 0;
 volatile uint8_t useLed1 = 0;
 
-unsigned long lastButtonPress = 0;
-const unsigned long DEBOUNCE_DELAY = 50;
+volatile uint32_t timer0_ticks = 0;  // For time tracking
+volatile uint32_t lastButtonPress = 0;
+volatile uint32_t lastLcdUpdate = 0;
+const uint16_t DEBOUNCE_DELAY = 50;
+const uint16_t LCD_UPDATE_INTERVAL = 100;
 
 char currentLine0[17] = "";
 char currentLine1[17] = "";
 char newLine0[17] = "";
 char newLine1[17] = "";
 
-unsigned long myTime;
 char printBuffer[128];
 
-volatile bool flag_lcd = false;
+LiquidCrystal lcd(8, 9, 10, 11, 12, 13); // LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7
+SoftwareSerial btSerial(14, 15); // BT_RX (A0), BT_TX (A1)
 
-// -------- Timer1 for LCD refresh every 100ms --------
-void setupTimer1() {
-  noInterrupts();
-  TCCR1A = 0;
-  TCCR1B = 0;
-  TCNT1 = 0;
-
-  OCR1A = 24999; // 100ms at 16MHz with prescaler 64
-  TCCR1B |= (1 << WGM12);              // CTC mode
-  TCCR1B |= (1 << CS11) | (1 << CS10); // Prescaler 64
-  TIMSK1 |= (1 << OCIE1A);             // Enable Timer1 compare interrupt
-  interrupts();
+// Timer0 interrupt for 1ms ticks
+ISR(TIMER0_COMPA_vect) {
+    timer0_ticks++;
 }
 
-ISR(TIMER1_COMPA_vect) {
-  flag_lcd = true;
+// Initialize Timer0 for 1ms interrupts
+void initTimer0() {
+    TCCR0A = (1 << WGM01);             // CTC mode
+    TCCR0B = (1 << CS01) | (1 << CS00); // Prescaler 64
+    OCR0A = 249;                       // (16000000 / 64 / 1000) - 1 = 249
+    TIMSK0 = (1 << OCIE0A);            // Enable compare match interrupt
 }
 
-// -------- LCD Text Helpers --------
+uint32_t getTicks() {
+    uint32_t ticks;
+    cli();
+    ticks = timer0_ticks;
+    sei();
+    return ticks;
+}
+
+// --- GPIO helpers ---
+void setPinOutput(volatile uint8_t* ddr, uint8_t pin) {
+    *ddr |= (1 << pin);
+}
+
+void setPinInput(volatile uint8_t* ddr, uint8_t pin) {
+    *ddr &= ~(1 << pin);
+}
+
+void writePin(volatile uint8_t* port, uint8_t pin, uint8_t value) {
+    if (value) *port |= (1 << pin);
+    else *port &= ~(1 << pin);
+}
+
+uint8_t readPin(volatile uint8_t* pinReg, uint8_t pin) {
+    return (*pinReg & (1 << pin)) ? 1 : 0;
+}
+
+// --- Bluetooth functions ---
+void btPrint(const char* str) {
+    btSerial.print(str);
+}
+
+void btPrintln(const char* str) {
+    btSerial.println(str);
+}
+
+uint8_t btAvailable() {
+    return btSerial.available();
+}
+
+char btRead() {
+    return btSerial.read();
+}
+
+// ----- LCD text helpers -----
 void updateLCD(int line, const char* text) {
     char* currentLine = (line == 0) ? currentLine0 : currentLine1;
     if (strcmp(currentLine, text) != 0) {
@@ -74,72 +118,86 @@ void updateLCD(int line, const char* text) {
         currentLine[16] = '\0';
     }
 }
+
 void setLCDMessage(int line, const char* text) {
     char* targetLine = (line == 0) ? newLine0 : newLine1;
-    noInterrupts();
+    cli();
     strncpy(targetLine, text, 16);
     targetLine[16] = '\0';
-    interrupts();
+    sei();
 }
 
 void refreshLCD() {
-    updateLCD(0, newLine0);
-    updateLCD(1, newLine1);
+    uint32_t currentTicks = getTicks();
+    if (currentTicks - lastLcdUpdate >= LCD_UPDATE_INTERVAL) {
+        updateLCD(0, newLine0);
+        updateLCD(1, newLine1);
+        lastLcdUpdate = currentTicks;
+    }
 }
 
 uint8_t readButtonDebounced() {
     static uint8_t buttonStatePrev = 1;
-    static unsigned long lastDebounceTime = 0;
-    uint8_t reading = !digitalRead(BUTTON_PIN);
+    static uint32_t lastDebounceTime = 0;
+    uint8_t reading = !readPin(&PINC, BUTTON_PIN);
+    uint32_t currentTicks = getTicks();
+
     if (reading != buttonStatePrev) {
-        lastDebounceTime = millis();
+        lastDebounceTime = currentTicks;
     }
-    if ((millis() - lastDebounceTime) > DEBOUNCE_DELAY) {
+
+    if ((currentTicks - lastDebounceTime) > DEBOUNCE_DELAY) {
         if (reading != buttonState) {
             buttonState = reading;
             buttonStatePrev = reading;
             return buttonState;
         }
     }
+
     buttonStatePrev = reading;
     return buttonState;
 }
 
-// -------- Bluetooth --------
-void setupBluetoothUART() {
-    btSerial.begin(9600);
+void initIO() {
+    // Set LED pins as outputs
+    DDRC |= (1 << LED1_PIN) | (1 << LED2_PIN);
+
+    // Set PIR and button pins as inputs
+    DDRC &= ~((1 << PIR_PIN) | (1 << BUTTON_PIN));
+
+    // Enable pull-up for button
+    PORTC |= (1 << BUTTON_PIN);
+
+    // Ensure LEDs are off initially
+    PORTC &= ~((1 << LED1_PIN) | (1 << LED2_PIN));
 }
-void btPrint(const char* str) { btSerial.print(str); }
-void btPrintln(const char* str) { btSerial.println(str); }
-uint8_t btAvailable() { return btSerial.available(); }
-char btRead() { return btSerial.read(); }
 
-void setup() {
-    pinMode(LED1_PIN, OUTPUT);
-    pinMode(LED2_PIN, OUTPUT);
-    pinMode(PIR_PIN, INPUT);
-    pinMode(BUTTON_PIN, INPUT_PULLUP);
-    digitalWrite(LED1_PIN, LOW);
-    digitalWrite(LED2_PIN, LOW);
+int main() {
+    // Initialize all hardware
+    initIO();
+    initTimer0();
 
-    setupBluetoothUART();
-    setupTimer1();
+    // Initialize Bluetooth
+    btSerial.begin(9600);
 
-    delay(100);
+    // Initialize LCD
     lcd.begin(16, 2);
-    delay(50);
+    _delay_ms(50);
 
     setLCDMessage(0, "Senzor PIR");
     setLCDMessage(1, "Asteptare...");
     refreshLCD();
+    lastLcdUpdate = getTicks();
 
     btPrintln("Sistem pornit cu Bluetooth!");
-}
+    sei();  // Enable global interrupts
+    while (1) {
+        uint32_t currentTicks = getTicks();
 
-void loop() {
-    pirVal = digitalRead(PIR_PIN);
-    if (pirVal) {
-        setLCDMessage(0, "Miscare");
+        // Read PIR sensor
+        pirVal = readPin(&PINC, PIR_PIN);
+
+        // Check Bluetooth
         if (btAvailable()) {
             char cmd = btRead();
             btPrint("Comanda BT: ");
@@ -148,56 +206,62 @@ void loop() {
 
             if (cmd == '1') {
                 useLed1 = 1;
-            } else if (cmd == '0') {
-                useLed1 = 0;
+                btPrintln("Selectat LED ROSU");
+                if (pirVal) setLCDMessage(1, "LED ROSU aprins");
             }
-            setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
+            else if (cmd == '0') {
+                useLed1 = 0;
+                btPrintln("Selectat LED VERDE");
+                if (pirVal) setLCDMessage(1, "LED VERDE aprins");
+            }
         }
-    }
 
-    uint8_t currentButtonState = readButtonDebounced();
-    if (currentButtonState && !lastButtonState && (millis() - lastButtonPress > DEBOUNCE_DELAY * 4)) {
-        useLed1 = !useLed1;
-        lastButtonPress = millis();
-        btPrint("Buton apasat! LED: ");
-        btPrintln(useLed1 ? "ROSU" : "VERDE");
-        setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
-    }
-    lastButtonState = currentButtonState;
+        // Button handling
+        uint8_t currentButtonState = readButtonDebounced();
+        if (currentButtonState && !lastButtonState && (currentTicks - lastButtonPress > DEBOUNCE_DELAY * 4)) {
+            useLed1 = !useLed1;
+            lastButtonPress = currentTicks;
+            btPrint("Buton apasat! LED: ");
+            btPrintln(useLed1 ? "ROSU" : "VERDE");
+            if (pirVal) {
+                setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
+            }
+        }
+        lastButtonState = currentButtonState;
 
-    if (pirVal) {
-        if (useLed1) {
-            digitalWrite(LED1_PIN, HIGH);
-            digitalWrite(LED2_PIN, LOW);
+        // LED control
+        if (pirVal) {
+            if (useLed1) {
+                PORTC |= (1 << LED1_PIN);
+                PORTC &= ~(1 << LED2_PIN);
+            } else {
+                PORTC &= ~(1 << LED1_PIN);
+                PORTC |= (1 << LED2_PIN);
+            }
+
+            if (!lastPirVal) {
+                uint32_t time = currentTicks;
+                sprintf(printBuffer, "%lu min %lu sec: Miscare!", time / MINUTE, (time % MINUTE) / SECOND);
+                btPrintln(printBuffer);
+                setLCDMessage(0, "Miscare");
+                setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
+                lastPirVal = 1;
+            }
         } else {
-            digitalWrite(LED1_PIN, LOW);
-            digitalWrite(LED2_PIN, HIGH);
-        }
-        if (!lastPirVal) {
-            myTime = millis();
-            sprintf(printBuffer, "%lu min %lu sec: Miscare!", myTime / MINUTE, (myTime % MINUTE) / SECOND);
-            btPrintln(printBuffer);
-            setLCDMessage(0, "Miscare");
-            setLCDMessage(1, useLed1 ? "LED ROSU aprins" : "LED VERDE aprins");
-            lastPirVal = 1;
-        }
-    } else {
-        digitalWrite(LED1_PIN, LOW);
-        digitalWrite(LED2_PIN, LOW);
-        if (lastPirVal) {
-            myTime = millis();
-            sprintf(printBuffer, "%lu min %lu sec: Miscare oprita!", myTime / MINUTE, (myTime % MINUTE) / SECOND);
-            btPrintln(printBuffer);
-            setLCDMessage(0, "Fara miscare");
-            setLCDMessage(1, "LED-uri stinse");
-            lastPirVal = 0;
-        }
-    }
+            PORTC &= ~((1 << LED1_PIN) | (1 << LED2_PIN));
 
-    if (flag_lcd) {
-        flag_lcd = false;
+            if (lastPirVal) {
+                uint32_t time = currentTicks;
+                sprintf(printBuffer, "%lu min %lu sec: Miscare oprita!", time / MINUTE, (time % MINUTE) / SECOND);
+                btPrintln(printBuffer);
+                setLCDMessage(0, "Fara miscare");
+                setLCDMessage(1, "LED-uri stinse");
+                lastPirVal = 0;
+            }
+        }
+
         refreshLCD();
+        _delay_ms(10);
     }
-
-    delay(10);
+    return 0;
 }
